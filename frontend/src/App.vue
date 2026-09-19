@@ -76,8 +76,29 @@ async function signup() {
     return
   }
 
-  if (password.value.length < 6) {
-    signupError.value = 'Password must be at least 6 characters.'
+  // Password validation
+  if (password.value.length < 8) {
+    signupError.value = 'Password must be at least 8 characters.'
+    return
+  }
+
+  if (!/[A-Z]/.test(password.value)) {
+    signupError.value = 'Password must contain at least one uppercase letter.'
+    return
+  }
+
+  if (!/[a-z]/.test(password.value)) {
+    signupError.value = 'Password must contain at least one lowercase letter.'
+    return
+  }
+
+  if (!/[0-9]/.test(password.value)) {
+    signupError.value = 'Password must contain at least one number.'
+    return
+  }
+
+  if (!/[!@#$%^&*(),.?":{}|<>_\-\[\]'/+=;`~]/.test(password.value)) {
+    signupError.value = 'Password must contain at least one special character.'
     return
   }
 
@@ -627,7 +648,7 @@ onMounted(() => {
           v-model="password"
           type="password"
           class="field-input"
-          placeholder="At least 6 characters"
+          placeholder="8+ chars, A-Z, a-z, 0-9 & special character"
           autocomplete="new-password"
         />
 
