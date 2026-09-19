@@ -2,6 +2,7 @@ from flask import Blueprint, request, jsonify, session
 from werkzeug.security import generate_password_hash, check_password_hash
 import sys
 import os
+import re
 
 
 # Project root
@@ -17,6 +18,38 @@ from database.database import get_db_connection
 
 
 auth_bp = Blueprint("auth", __name__)
+
+
+# =========================================================
+# PASSWORD VALIDATION
+# =========================================================
+
+def validate_password(password):
+    """
+    Password requirements:
+    - Minimum 8 characters
+    - At least 1 uppercase letter
+    - At least 1 lowercase letter
+    - At least 1 number
+    - At least 1 special character
+    """
+
+    if len(password) < 8:
+        return "Password must be at least 8 characters"
+
+    if not re.search(r"[A-Z]", password):
+        return "Password must contain at least one uppercase letter"
+
+    if not re.search(r"[a-z]", password):
+        return "Password must contain at least one lowercase letter"
+
+    if not re.search(r"\d", password):
+        return "Password must contain at least one number"
+
+    if not re.search(r"[!@#$%^&*(),.?\":{}|<>_\-\\[\]'/+=;`~]", password):
+        return "Password must contain at least one special character"
+
+    return None
 
 
 # =========================================================
@@ -60,10 +93,12 @@ def register():
         }), 400
 
     # Password validation
-    if len(password) < 8:
+    password_error = validate_password(password)
+
+    if password_error:
         return jsonify({
             "status": "error",
-            "message": "Password must be at least 8 characters"
+            "message": password_error
         }), 400
 
     connection = get_db_connection()
@@ -120,6 +155,7 @@ def register():
         }), 201
 
     except Exception:
+
         connection.rollback()
 
         return jsonify({
