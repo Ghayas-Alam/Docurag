@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, watch, nextTick } from 'vue'
 
 const API_URL = 'http://127.0.0.1:8000'
 
@@ -59,7 +59,7 @@ async function login() {
     const role = data.user?.role || 'user'
 
     if (authPortal.value === 'admin' && role !== 'admin') {
-      loginError.value = 'Admin account required. Please use an admin account.'
+      loginError.value = 'Invalid email or password.'
       return
     }
 
@@ -242,6 +242,67 @@ const adminDocuments = ref([])
 const adminFailures = ref([])
 const adminQueries = ref([])
 const adminActionLoading = ref(null)
+const adminLastUpdated = ref(null)
+
+const userSearch = ref('')
+const userStatusFilter = ref('all')
+const userRoleFilter = ref('all')
+const documentSearch = ref('')
+const documentStatusFilter = ref('all')
+const documentTypeFilter = ref('all')
+const querySearch = ref('')
+
+const filteredAdminUsers = computed(() => {
+  const search = userSearch.value.trim().toLowerCase()
+  return adminUsers.value.filter(user => {
+    const matchesSearch = !search ||
+      String(user.username || '').toLowerCase().includes(search) ||
+      String(user.email || '').toLowerCase().includes(search)
+    const matchesStatus = userStatusFilter.value === 'all' ||
+      (user.is_active ? 'active' : 'inactive') === userStatusFilter.value
+    const matchesRole = userRoleFilter.value === 'all' ||
+      String(user.role || 'user').toLowerCase() === userRoleFilter.value
+    return matchesSearch && matchesStatus && matchesRole
+  })
+})
+
+const filteredAdminDocuments = computed(() => {
+  const search = documentSearch.value.trim().toLowerCase()
+  return adminDocuments.value.filter(document => {
+    const name = String(document.original_filename || document.filename || '').toLowerCase()
+    const uploader = String(document.uploader_username || '').toLowerCase()
+    const type = String(document.file_type || '').toLowerCase()
+    const status = String(document.processing_status || '').toLowerCase()
+    const matchesSearch = !search || name.includes(search) || uploader.includes(search)
+    const matchesStatus = documentStatusFilter.value === 'all' || status === documentStatusFilter.value
+    const matchesType = documentTypeFilter.value === 'all' || type === documentTypeFilter.value
+    return matchesSearch && matchesStatus && matchesType
+  })
+})
+
+const filteredAdminQueries = computed(() => {
+  const search = querySearch.value.trim().toLowerCase()
+  return adminQueries.value.filter(query => {
+    if (!search) return true
+    return String(query.question || '').toLowerCase().includes(search) ||
+      String(query.username || '').toLowerCase().includes(search) ||
+      String(query.email || '').toLowerCase().includes(search)
+  })
+})
+
+const adminDocumentTypes = computed(() => {
+  return [...new Set(adminDocuments.value.map(document => String(document.file_type || '').toLowerCase()).filter(Boolean))].sort()
+})
+
+function clearAdminFilters() {
+  userSearch.value = ''
+  userStatusFilter.value = 'all'
+  userRoleFilter.value = 'all'
+  documentSearch.value = ''
+  documentStatusFilter.value = 'all'
+  documentTypeFilter.value = 'all'
+  querySearch.value = ''
+}
 
 async function adminFetch(path, options = {}) {
   const token = localStorage.getItem('access_token')
@@ -293,6 +354,7 @@ async function loadAdminData() {
     adminDocuments.value = documents.documents || []
     adminFailures.value = failures.failures || []
     adminQueries.value = queries.queries || []
+    adminLastUpdated.value = new Date()
   } catch (error) {
     console.error('Admin dashboard error:', error)
     adminError.value = error.message || 'Failed to load admin dashboard.'
@@ -813,6 +875,20 @@ function getFileKind(document) {
   return 'DOC'
 }
 
+function formatFileSize(bytes) {
+  const size = Number(bytes)
+  if (!Number.isFinite(size) || size <= 0) return ''
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  if (size < 1024 * 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`
+  return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`
+}
+
+function formatStatus(status) {
+  const value = String(status || 'uploaded').toLowerCase()
+  return value.charAt(0).toUpperCase() + value.slice(1)
+}
+
 onMounted(async () => {
   restoreChatState()
 
@@ -1182,7 +1258,7 @@ onMounted(async () => {
           />
 
           <div
-            class="dropzone"
+            class="dropzone dropzone--polished"
             role="button"
             tabindex="0"
             aria-label="Add a document"
@@ -1194,10 +1270,16 @@ onMounted(async () => {
             @dragleave="handleDragLeave"
             @drop="handleDrop"
           >
-            <span v-if="uploading">Uploading…</span>
-            <span v-else>
+            <span v-if="uploading" class="dropzone-content">
+              <span class="upload-icon upload-icon--spin">↻</span>
+              <strong>Uploading document…</strong>
+              <small>Please wait while DocuRAG processes your file.</small>
+            </span>
+            <span v-else class="dropzone-content">
+              <span class="upload-icon">↑</span>
               <strong>Add a document</strong>
-              <small>Drop a file here, or click to browse</small>
+              <small>Drop PDF or image here, or click to browse</small>
+              <em>PDF · PNG · JPG · JPEG</em>
             </span>
           </div>
 
@@ -1212,9 +1294,32 @@ onMounted(async () => {
               :class="{ 'document-item--active': selectedDocumentId === document.id }"
               @click="selectDocument(document.id)"
             >
-              <span class="document-kind">{{ getFileKind(document) }}</span>
-              <span class="document-name" :title="getDocumentName(document)">
-                {{ getDocumentName(document) }}
+              <span
+                class="document-kind"
+                :class="`document-kind--${getFileKind(document).toLowerCase()}`"
+                aria-hidden="true"
+              >
+                {{ getFileKind(document) }}
+              </span>
+
+              <span class="document-info">
+                <span class="document-name" :title="getDocumentName(document)">
+                  {{ getDocumentName(document) }}
+                </span>
+
+                <span class="document-meta">
+                  <span class="document-type-label">
+                    {{ getFileKind(document) }}<span v-if="document.file_size"> · {{ formatFileSize(document.file_size) }}</span>
+                  </span>
+                </span>
+
+                <span
+                  class="document-status"
+                  :class="`document-status--${String(document.processing_status || 'uploaded').toLowerCase()}`"
+                >
+                  <span class="status-dot"></span>
+                  {{ formatStatus(document.processing_status) }}
+                </span>
               </span>
               <button
                 type="button"
@@ -1229,9 +1334,10 @@ onMounted(async () => {
             </li>
           </ul>
 
-          <div v-else class="empty-note">
-            <p>No documents yet.</p>
-            <p class="empty-note-sub">Add a PDF or image to start asking questions.</p>
+          <div v-else class="empty-note empty-note--documents">
+            <div class="empty-state-icon">◇</div>
+            <p>No documents yet</p>
+            <p class="empty-note-sub">Upload a PDF or image above to start asking questions.</p>
           </div>
 
         </div>
@@ -1262,10 +1368,16 @@ onMounted(async () => {
 
         <div class="chat-container">
 
-          <div v-if="messages.length === 0" class="welcome">
-            <span class="brand-mark brand-mark--lg">DR</span>
+          <div v-if="messages.length === 0" class="welcome welcome--polished">
+            <div class="welcome-badge">AI DOCUMENT ASSISTANT</div>
+            <span class="brand-mark brand-mark--lg welcome-logo">DR</span>
             <h1>Ask your documents anything.</h1>
-            <p>Upload a document, then ask a question about what's inside.</p>
+            <p>Upload a document and let DocuRAG find the relevant information, answer your question, and show you where it came from.</p>
+            <div class="welcome-features">
+              <span>⌕ Natural-language search</span>
+              <span>◈ PDF &amp; image support</span>
+              <span>✓ Source-backed answers</span>
+            </div>
           </div>
 
           <div v-else class="messages" aria-live="polite">
@@ -1359,6 +1471,7 @@ onMounted(async () => {
             <button
               class="btn btn-ink"
               :disabled="asking || !question.trim()"
+              :aria-label="asking ? 'Searching documents' : 'Ask DocuRAG'"
               @click="askQuestion"
             >
               <span v-if="asking">…</span>
@@ -1410,6 +1523,7 @@ onMounted(async () => {
           <p class="admin-eyebrow">CONTROL PANEL</p>
           <h1>Admin Dashboard</h1>
           <p>Manage users, documents, processing status and query activity.</p>
+          <small v-if="adminLastUpdated" class="admin-last-updated">Updated {{ adminLastUpdated.toLocaleTimeString() }}</small>
         </div>
         <span class="admin-secure-badge">Administrator</span>
       </div>
@@ -1445,7 +1559,27 @@ onMounted(async () => {
             <h2>Users</h2>
             <p>Account status and access management.</p>
           </div>
-          <span>{{ adminUsers.length }} users</span>
+          <span>{{ filteredAdminUsers.length }} of {{ adminUsers.length }} users</span>
+        </div>
+
+        <div class="admin-filter-bar">
+          <input
+            v-model="userSearch"
+            class="admin-filter-input"
+            type="search"
+            placeholder="Search username or email…"
+          />
+          <select v-model="userStatusFilter" class="admin-filter-select">
+            <option value="all">All statuses</option>
+            <option value="active">Active</option>
+            <option value="inactive">Inactive</option>
+          </select>
+          <select v-model="userRoleFilter" class="admin-filter-select">
+            <option value="all">All roles</option>
+            <option value="user">Users</option>
+            <option value="admin">Admins</option>
+          </select>
+          <button type="button" class="admin-filter-clear" @click="clearAdminFilters">Clear</button>
         </div>
 
         <div class="admin-table-wrap">
@@ -1461,10 +1595,10 @@ onMounted(async () => {
               </tr>
             </thead>
             <tbody>
-              <tr v-if="!adminUsers.length">
+              <tr v-if="!filteredAdminUsers.length">
                 <td colspan="6" class="admin-empty">No users found.</td>
               </tr>
-              <tr v-for="user in adminUsers" :key="user.id">
+              <tr v-for="user in filteredAdminUsers" :key="user.id">
                 <td><strong>{{ user.username }}</strong></td>
                 <td>{{ user.email }}</td>
                 <td><span class="admin-role">{{ user.role }}</span></td>
@@ -1513,7 +1647,28 @@ onMounted(async () => {
             <h2>Documents</h2>
             <p>All uploaded documents and their processing state.</p>
           </div>
-          <span>{{ adminDocuments.length }} documents</span>
+          <span>{{ filteredAdminDocuments.length }} of {{ adminDocuments.length }} documents</span>
+        </div>
+
+        <div class="admin-filter-bar">
+          <input
+            v-model="documentSearch"
+            class="admin-filter-input"
+            type="search"
+            placeholder="Search filename or uploader…"
+          />
+          <select v-model="documentStatusFilter" class="admin-filter-select">
+            <option value="all">All statuses</option>
+            <option value="processed">Processed</option>
+            <option value="processing">Processing</option>
+            <option value="uploaded">Uploaded</option>
+            <option value="failed">Failed</option>
+          </select>
+          <select v-model="documentTypeFilter" class="admin-filter-select">
+            <option value="all">All types</option>
+            <option v-for="type in adminDocumentTypes" :key="type" :value="type">{{ type.toUpperCase() }}</option>
+          </select>
+          <button type="button" class="admin-filter-clear" @click="clearAdminFilters">Clear</button>
         </div>
 
         <div class="admin-table-wrap">
@@ -1529,10 +1684,10 @@ onMounted(async () => {
               </tr>
             </thead>
             <tbody>
-              <tr v-if="!adminDocuments.length">
+              <tr v-if="!filteredAdminDocuments.length">
                 <td colspan="6" class="admin-empty">No documents found.</td>
               </tr>
-              <tr v-for="document in adminDocuments" :key="document.id">
+              <tr v-for="document in filteredAdminDocuments" :key="document.id">
                 <td :title="document.original_filename">{{ document.original_filename || document.filename }}</td>
                 <td>{{ document.uploader_username || 'Unknown' }}</td>
                 <td>{{ document.file_type || '—' }}</td>
@@ -1572,9 +1727,18 @@ onMounted(async () => {
             </div>
             <span>{{ adminQueries.length }}</span>
           </div>
-          <div v-if="!adminQueries.length" class="admin-empty-box">No queries found.</div>
+          <div class="admin-filter-bar admin-filter-bar--compact">
+            <input
+              v-model="querySearch"
+              class="admin-filter-input"
+              type="search"
+              placeholder="Search questions or users…"
+            />
+            <button type="button" class="admin-filter-clear" @click="querySearch = ''">Clear</button>
+          </div>
+          <div v-if="!filteredAdminQueries.length" class="admin-empty-box">No matching queries found.</div>
           <div v-else class="admin-query-list">
-            <article v-for="query in adminQueries.slice(0, 20)" :key="query.id" class="admin-query-item">
+            <article v-for="query in filteredAdminQueries.slice(0, 20)" :key="query.id" class="admin-query-item">
               <strong>{{ query.question }}</strong>
               <span>{{ query.username || 'Unknown user' }} · {{ query.confidence != null ? (Number(query.confidence) * 100).toFixed(1) + '% confidence' : 'No confidence' }}</span>
               <small>{{ formatAdminDate(query.created_at) }}</small>
@@ -1860,6 +2024,71 @@ onMounted(async () => {
   font-weight: 700;
 }
 
+.admin-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  padding: 14px 18px;
+  border-bottom: 1px solid #edf1f5;
+  background: #fbfcfe;
+}
+
+.admin-filter-bar--compact {
+  border-bottom: 0;
+  padding: 12px 18px;
+}
+
+.admin-filter-input,
+.admin-filter-select {
+  min-height: 38px;
+  border: 1px solid #d7dee8;
+  border-radius: 8px;
+  background: #fff;
+  color: #1e293b;
+  padding: 8px 11px;
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.admin-filter-input {
+  flex: 1 1 240px;
+  min-width: 200px;
+}
+
+.admin-filter-select {
+  min-width: 130px;
+}
+
+.admin-filter-input:focus,
+.admin-filter-select:focus {
+  border-color: #b47a20;
+  box-shadow: 0 0 0 3px rgba(180, 122, 32, 0.10);
+}
+
+.admin-filter-clear {
+  min-height: 38px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  color: #475569;
+  padding: 8px 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.admin-filter-clear:hover {
+  background: #f8fafc;
+  color: #111827;
+}
+
+.admin-last-updated {
+  display: block;
+  margin-top: 7px;
+  color: #94a3b8;
+  font-size: 11px;
+}
+
 .admin-table-wrap {
   width: 100%;
   overflow-x: auto;
@@ -2008,4 +2237,1005 @@ onMounted(async () => {
   .admin-panel-heading { align-items: flex-start; }
 }
 
+
+/* ============================================================
+   USER DASHBOARD POLISH
+   Visual-only improvements; existing functionality is unchanged.
+   ============================================================ */
+.workspace {
+  height: calc(100dvh - 68px);
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(300px, 25%) minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.sidebar {
+  min-height: 0;
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+
+.sidebar::-webkit-scrollbar {
+  width: 7px;
+}
+
+.sidebar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sidebar::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 999px;
+}
+
+.sidebar-section--muted {
+  border-top: 1px solid #edf1f5;
+  padding-bottom: 28px;
+  background: #fbfcfe;
+}
+
+.sidebar-section--muted h2 {
+  margin: 0 0 12px;
+  color: #172033;
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.recent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.recent-list li {
+  padding: 10px 11px;
+  border: 1px solid #e7ebf0;
+  border-radius: 10px;
+  background: #fff;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.recent-list li:hover {
+  border-color: #d7dee8;
+  background: #f8fafc;
+}
+
+.workspace {
+  background: #f7f8fa;
+}
+
+.sidebar {
+  background: #ffffff;
+  border-right: 1px solid #e7ebf0;
+}
+
+.sidebar-section {
+  padding: 18px 16px;
+}
+
+.sidebar-heading {
+  margin-bottom: 14px;
+}
+
+.sidebar-heading h2 {
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+
+.sidebar-count {
+  min-width: 24px;
+  height: 24px;
+  padding: 0 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.dropzone--polished {
+  min-height: 132px;
+  padding: 20px 14px;
+  border: 1.5px dashed #cbd5e1;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #fbfcfe 0%, #f7f9fc 100%);
+  transition: border-color .18s ease, background .18s ease, transform .18s ease, box-shadow .18s ease;
+}
+
+.dropzone--polished:hover,
+.dropzone--polished.dropzone--active {
+  border-color: #b47a14;
+  background: #fffcf5;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, .06);
+  transform: translateY(-1px);
+}
+
+.dropzone--polished.dropzone--busy {
+  cursor: wait;
+  opacity: .82;
+}
+
+.dropzone-content {
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dropzone-content strong {
+  color: #172033;
+  font-size: 14px;
+}
+
+.dropzone-content small {
+  max-width: 220px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.dropzone-content em {
+  margin-top: 2px;
+  color: #94a3b8;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.upload-icon {
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: #111827;
+  color: #fff;
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.upload-icon--spin {
+  animation: docurag-spin 1s linear infinite;
+}
+
+@keyframes docurag-spin {
+  to { transform: rotate(360deg); }
+}
+
+.document-list {
+  margin-top: 16px;
+  gap: 7px;
+}
+
+.document-item {
+  min-height: 68px;
+  padding: 10px 9px;
+  border: 1px solid #e8edf3;
+  border-radius: 12px;
+  background: #fff;
+  transition: background .15s ease, border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+
+.document-item:hover {
+  background: #fbfcfe;
+  border-color: #dbe3ec;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, .05);
+}
+
+.document-item--active {
+  background: #fffbf2;
+  border-color: rgba(180, 120, 20, .38);
+  box-shadow: inset 3px 0 0 #b47a14, 0 4px 12px rgba(180, 120, 20, .07);
+}
+
+.document-kind {
+  flex: 0 0 38px;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #eef2f7;
+  color: #334155;
+  font-size: 9px;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+
+.document-kind--pdf {
+  background: #fff1f2;
+  color: #b42318;
+}
+
+.document-kind--img {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.document-info {
+  gap: 3px;
+}
+
+.document-name {
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.document-meta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.document-type-label {
+  color: #94a3b8;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+
+.document-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1.2;
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+}
+
+.document-status--processed { color: #15803d; }
+.document-status--processed .status-dot { background: #22c55e; }
+.document-status--processing { color: #a16207; }
+.document-status--processing .status-dot { background: #eab308; }
+.document-status--failed { color: #b91c1c; }
+.document-status--failed .status-dot { background: #ef4444; }
+.document-status--uploaded { color: #64748b; }
+
+.document-remove {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  color: #94a3b8;
+  transition: color .15s ease, background .15s ease;
+}
+
+.document-remove:hover:not(:disabled) {
+  color: #b91c1c;
+  background: #fef2f2;
+}
+
+.empty-note--documents {
+  margin-top: 14px;
+  padding: 18px 12px;
+  border: 1px dashed #d7dee8;
+  border-radius: 12px;
+  text-align: center;
+}
+
+.empty-state-icon {
+  width: 38px;
+  height: 38px;
+  margin: 0 auto 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: #f1f5f9;
+  color: #64748b;
+  font-size: 20px;
+}
+
+.welcome--polished {
+  width: min(100%, 720px);
+  max-width: 720px;
+  margin: 28px auto;
+  padding: 36px 28px;
+  align-self: start;
+  min-height: 0;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  border: 1px solid #e5eaf0;
+  border-radius: 24px;
+  background: rgba(255,255,255,.9);
+  box-shadow: 0 18px 50px rgba(15, 23, 42, .06);
+}
+
+.welcome-badge {
+  display: inline-flex;
+  margin-bottom: 18px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: #f7f4ed;
+  color: #8b5e00;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .1em;
+}
+
+.welcome-logo {
+  margin: 0 auto 18px;
+}
+
+.welcome--polished h1 {
+  margin: 0 auto 14px;
+  max-width: 620px;
+  color: #111827;
+  font-size: clamp(34px, 4vw, 48px);
+  line-height: 1.08;
+  font-weight: 800;
+  letter-spacing: -.035em;
+  text-wrap: balance;
+}
+
+.welcome--polished > p {
+  max-width: 570px;
+  margin: 0 auto;
+  color: #64748b;
+  line-height: 1.7;
+}
+
+.welcome-features {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 24px;
+}
+
+.welcome-features span {
+  padding: 8px 11px;
+  border: 1px solid #e5eaf0;
+  border-radius: 999px;
+  background: #fff;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.chat-area {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  background: #f7f8fa;
+}
+
+.chat-container {
+  max-width: 900px;
+}
+
+/* =====================================================
+   CHAT / AI RESPONSE POLISH
+===================================================== */
+
+.messages {
+  width: min(100%, 900px);
+  margin: 0 auto;
+  padding: 28px 8px 110px;
+}
+
+.message-row {
+  display: flex;
+  width: 100%;
+  margin-bottom: 18px;
+}
+
+.message-row--user {
+  justify-content: flex-end;
+  padding-left: 12%;
+}
+
+.message-row--assistant {
+  justify-content: flex-start;
+  gap: 10px;
+  padding-right: 8%;
+}
+
+.bubble {
+  max-width: min(760px, 82%);
+  border-radius: 16px;
+  padding: 13px 16px;
+  line-height: 1.65;
+  font-size: 14px;
+  word-break: break-word;
+}
+
+.bubble--user {
+  background: #111827;
+  color: #fff;
+  border: 1px solid #111827;
+  border-bottom-right-radius: 5px;
+}
+
+.bubble--assistant {
+  flex: 1;
+  background: #fff;
+  color: #334155;
+  border: 1px solid #e3e8ef;
+  border-bottom-left-radius: 5px;
+  box-shadow: 0 5px 18px rgba(15, 23, 42, .04);
+}
+
+.bubble-text {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.brand-mark--sm {
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  margin-top: 2px;
+  border-radius: 9px;
+  font-size: 13px;
+}
+
+.confidence-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 13px;
+  padding-top: 10px;
+  border-top: 1px solid #eef2f6;
+}
+
+.confidence-meter {
+  width: 74px;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e8edf3;
+}
+
+.confidence-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: #b47a14;
+  transition: width .3s ease;
+}
+
+.confidence-label {
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.cache-tag {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: #ecfdf3;
+  color: #15803d;
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.citation-group {
+  margin-top: 13px;
+  padding-top: 11px;
+  border-top: 1px solid #eef2f6;
+}
+
+.citation-heading {
+  display: block;
+  margin-bottom: 7px;
+  color: #334155;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.citation-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.citation-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 6px 8px;
+  border: 1px solid #e5eaf0;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.citation-chip--image {
+  background: #f5f8ff;
+  border-color: #dfe8fa;
+}
+
+.citation-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  flex: 0 0 17px;
+  border-radius: 50%;
+  background: #111827;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.bubble--typing {
+  color: #64748b;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.typing-dots {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.typing-dots span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #94a3b8;
+  animation: docurag-bounce 1.1s infinite ease-in-out;
+}
+
+.typing-dots span:nth-child(2) {
+  animation-delay: .15s;
+}
+
+.typing-dots span:nth-child(3) {
+  animation-delay: .3s;
+}
+
+@keyframes docurag-bounce {
+  0%, 70%, 100% { transform: translateY(0); opacity: .45; }
+  35% { transform: translateY(-4px); opacity: 1; }
+}
+
+.chat-error {
+  max-width: 900px;
+  margin: 0 auto 10px;
+}
+
+.composer {
+  position: sticky;
+  bottom: 12px;
+  z-index: 5;
+  width: min(100%, 900px);
+  margin: 0 auto;
+  border: 1px solid #dce3eb;
+  border-radius: 15px;
+  background: rgba(255,255,255,.96);
+  padding: 6px;
+  box-shadow: 0 8px 28px rgba(15, 23, 42, .07);
+  backdrop-filter: blur(8px);
+}
+
+.composer-input {
+  flex: 1;
+  min-width: 0;
+  min-height: 46px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #172033;
+}
+
+.composer-input::placeholder {
+  color: #94a3b8;
+}
+
+.composer:focus-within {
+  border-color: rgba(180, 120, 20, .65);
+  box-shadow: 0 0 0 3px rgba(180, 120, 20, .08), 0 8px 28px rgba(15, 23, 42, .07);
+}
+
+.composer .btn {
+  min-width: 78px;
+  min-height: 44px;
+  border-radius: 10px;
+}
+
+.composer-hint {
+  width: min(100%, 900px);
+  margin: 7px auto 0;
+  color: #64748b;
+  font-size: 10px;
+}
+
+.composer-hint--warn {
+  color: #b45309;
+}
+
+@media (max-width: 800px) {
+  .messages {
+    padding: 20px 4px 100px;
+  }
+
+  .message-row--user {
+    padding-left: 6%;
+  }
+
+  .message-row--assistant {
+    padding-right: 2%;
+  }
+
+  .bubble {
+    max-width: 90%;
+  }
+
+  .composer {
+    bottom: 6px;
+  }
+
+  .citation-chip {
+    width: 100%;
+  }
+}
+
+.bubble--assistant {
+  border: 1px solid #e3e8ef;
+  box-shadow: 0 5px 18px rgba(15, 23, 42, .04);
+}
+
+.bubble--user {
+  box-shadow: 0 4px 14px rgba(15, 23, 42, .08);
+}
+
+.composer {
+  border: 1px solid #dce3eb;
+  border-radius: 15px;
+  background: #fff;
+  padding: 6px;
+  box-shadow: 0 8px 28px rgba(15, 23, 42, .07);
+}
+
+.composer:focus-within {
+  border-color: rgba(180, 120, 20, .65);
+  box-shadow: 0 0 0 3px rgba(180, 120, 20, .08), 0 8px 28px rgba(15, 23, 42, .07);
+}
+
+.composer-input {
+  min-height: 46px;
+}
+
+.composer .btn {
+  min-width: 78px;
+  min-height: 44px;
+  border-radius: 10px;
+}
+
+.composer-hint {
+  color: #64748b;
+  font-size: 11px;
+}
+
+@media (max-width: 800px) {
+  .workspace {
+    height: auto;
+    min-height: calc(100dvh - 68px);
+    display: block;
+    overflow: visible;
+  }
+
+  .sidebar {
+    height: auto;
+    max-height: 52vh;
+    overflow-y: auto;
+    border-right: 0;
+    border-bottom: 1px solid #e7ebf0;
+  }
+
+  .welcome--polished {
+    width: 100%;
+    margin: 20px 0;
+    padding: 30px 20px;
+    border-radius: 18px;
+  }
+
+  .welcome-features {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .welcome-features span {
+    text-align: center;
+  }
+}
+
+
+/* =====================================================
+   FINAL POLISH: AUTH
+===================================================== */
+.auth-page,
+.auth-shell,
+.auth-card {
+  transition: all .2s ease;
+}
+
+.auth-card {
+  border: 1px solid #e5eaf0;
+  border-radius: 20px;
+  box-shadow: 0 18px 55px rgba(15, 23, 42, .08);
+}
+
+.auth-card input,
+.auth-card .form-control {
+  min-height: 46px;
+  border-radius: 10px;
+  border-color: #dbe2ea;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+
+.auth-card input:focus,
+.auth-card .form-control:focus {
+  border-color: #b47a14;
+  box-shadow: 0 0 0 3px rgba(180, 120, 20, .09);
+}
+
+.auth-admin-link {
+  transition: color .15s ease, background .15s ease;
+}
+
+.auth-admin-link:hover {
+  color: #8b5e00;
+  background: #fffbf2;
+}
+
+.password-toggle {
+  transition: color .15s ease, background .15s ease;
+}
+
+.inline-note--danger,
+.alert-danger {
+  border-radius: 10px;
+}
+
+.inline-note--success,
+.alert-success {
+  border-radius: 10px;
+}
+
+/* =====================================================
+   FINAL POLISH: PROCESSING / STATES / NAVBAR / RESPONSIVE
+===================================================== */
+
+.document-item--disabled {
+  opacity: .72;
+  cursor: wait;
+}
+
+.document-item--disabled .document-remove {
+  pointer-events: none;
+}
+
+.document-status--processed {
+  color: #15803d;
+}
+
+.document-status--processing {
+  color: #b45309;
+}
+
+.document-status--failed {
+  color: #b91c1c;
+}
+
+.document-status--uploaded {
+  color: #475569;
+}
+
+.document-status--processed .status-dot {
+  background: #16a34a;
+}
+
+.document-status--processing .status-dot {
+  background: #f59e0b;
+  animation: status-pulse 1.2s infinite ease-in-out;
+}
+
+.document-status--failed .status-dot {
+  background: #dc2626;
+}
+
+.document-status--uploaded .status-dot {
+  background: #64748b;
+}
+
+@keyframes status-pulse {
+  50% { opacity: .35; transform: scale(.7); }
+}
+
+.empty-note {
+  color: #64748b;
+}
+
+.empty-note-sub {
+  line-height: 1.55;
+}
+
+.inline-note {
+  line-height: 1.45;
+}
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  backdrop-filter: blur(10px);
+  background: rgba(255,255,255,.94);
+  border-bottom: 1px solid #e8edf3;
+}
+
+.topbar-actions {
+  gap: 8px;
+}
+
+.topbar .btn {
+  min-height: 34px;
+  border-radius: 9px;
+  transition: transform .15s ease, box-shadow .15s ease, background .15s ease;
+}
+
+.topbar .btn:hover {
+  transform: translateY(-1px);
+}
+
+.chat-area {
+  min-width: 0;
+}
+
+.sidebar {
+  min-width: 0;
+}
+
+.document-list,
+.recent-list {
+  padding-right: 2px;
+}
+
+.recent-list li {
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-height: 1.45;
+}
+
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: .58;
+}
+
+button:focus-visible,
+input:focus-visible,
+.dropzone:focus-visible {
+  outline: 3px solid rgba(180, 120, 20, .18);
+  outline-offset: 2px;
+}
+
+@media (max-width: 900px) {
+  .workspace {
+    min-height: calc(100dvh - 57px);
+  }
+
+  .topbar-title {
+    font-size: 15px;
+  }
+
+  .topbar-actions .btn {
+    padding-inline: 9px;
+  }
+
+  .sidebar {
+    max-height: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .topbar {
+    padding: 10px 12px;
+  }
+
+  .topbar-actions .btn-outline-brass {
+    display: none;
+  }
+
+  .workspace {
+    display: block;
+  }
+
+  .sidebar {
+    width: 100%;
+    max-height: none;
+    border-right: 0;
+    border-bottom: 1px solid #e8edf3;
+  }
+
+  .chat-area {
+    min-height: calc(100dvh - 57px);
+  }
+
+  .welcome--polished {
+    margin: 18px 0;
+    padding: 30px 18px;
+    border-radius: 18px;
+  }
+
+  .welcome--polished h1 {
+    font-size: clamp(28px, 8vw, 40px);
+  }
+
+  .messages {
+    padding-bottom: 95px;
+  }
+
+  .message-row--user,
+  .message-row--assistant {
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  .bubble {
+    max-width: 92%;
+  }
+
+  .composer {
+    border-radius: 13px;
+  }
+}
+
+</style>
+
+<style>
+/* Final brand visibility override */
+.topbar .topbar-title,
+.admin-topbar .topbar-title {
+  color: #111827 !important;
+  -webkit-text-fill-color: #111827 !important;
+  opacity: 1 !important;
+  visibility: visible !important;
+  font-weight: 800 !important;
+}
 </style>
