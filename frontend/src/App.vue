@@ -64,7 +64,7 @@ async function login() {
     }
 
     if (authPortal.value === 'user' && role === 'admin') {
-      loginError.value = 'This is an admin account. Please use Admin Login.'
+      loginError.value = 'Invalid email or password.'
       return
     }
 

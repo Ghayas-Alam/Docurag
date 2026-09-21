@@ -269,15 +269,21 @@ async def upload_document(
         # Generate safe stored filename
         # ----------------------------------------------------
         stored_filename = (
-            f"{uuid.uuid4().hex}_"
-            f"{original_filename}"
-        )
+             f"{uuid.uuid4().hex}_"
+             f"{original_filename}"
+        )  
+        # Separate storage for PDFs and images 
+        if extension == ".pdf":
+            storage_dir = os.path.join(UPLOAD_DIR, "pdfs")
+        else:
+            storage_dir = os.path.join(UPLOAD_DIR, "images")
+
+        os.makedirs(storage_dir, exist_ok=True)
 
         file_path = os.path.join(
-            UPLOAD_DIR,
-            stored_filename
+        storage_dir,
+        stored_filename
         )
-
         # ----------------------------------------------------
         # Save physical file
         # ----------------------------------------------------
