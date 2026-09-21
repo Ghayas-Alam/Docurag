@@ -3,9 +3,13 @@ import sys
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
 from backend.api.auth_api import auth_router
 from backend.api.documents_api import documents_router
 from backend.api.rag_api import rag_router
+from backend.api.admin_api import admin_router
+
+
 # ============================================================
 # PATH SETUP
 # ============================================================
@@ -44,9 +48,33 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"]
 )
-app.include_router(auth_router)
-app.include_router(documents_router)
-app.include_router(rag_router)
+
+
+# ============================================================
+# API ROUTERS
+# ============================================================
+
+# Authentication
+app.include_router(
+    auth_router
+)
+
+# Documents
+app.include_router(
+    documents_router
+)
+
+# RAG
+app.include_router(
+    rag_router
+)
+
+# Admin
+app.include_router(
+    admin_router
+)
+
+
 # ============================================================
 # HEALTH CHECK
 # ============================================================

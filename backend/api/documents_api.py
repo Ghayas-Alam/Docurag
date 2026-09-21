@@ -4,48 +4,36 @@ import hashlib
 import uuid
 import shutil
 
-from fastapi import APIRouter, UploadFile, File, Header, HTTPException
-
+from fastapi import (
+    APIRouter,
+    UploadFile,
+    File,
+    Header,
+    HTTPException
+)
 
 # ============================================================
 # PATH SETUP
 # ============================================================
-
-CURRENT_DIR = os.path.dirname(
-    os.path.abspath(__file__)
-)
-
-BACKEND_ROOT = os.path.dirname(
-    CURRENT_DIR
-)
-
-PROJECT_ROOT = os.path.dirname(
-    BACKEND_ROOT
-)
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+BACKEND_ROOT = os.path.dirname(CURRENT_DIR)
+PROJECT_ROOT = os.path.dirname(BACKEND_ROOT)
 
 sys.path.insert(0, BACKEND_ROOT)
 sys.path.insert(0, PROJECT_ROOT)
 
-
 # ============================================================
-# IMPORTS
+# PROJECT IMPORTS
 # ============================================================
-
 from database.database import get_db_connection
-
 from services.document_processor import process_pdf
-
-from services.image_file_processor import (
-    analyze_uploaded_image
-)
-
+from services.image_file_processor import analyze_uploaded_image
 from services.vector_store import rebuild_index
 
 
 # ============================================================
 # ROUTER
 # ============================================================
-
 documents_router = APIRouter(
     prefix="/api/documents",
     tags=["Documents"]
@@ -55,179 +43,194 @@ documents_router = APIRouter(
 # ============================================================
 # CONFIGURATION
 # ============================================================
+UPLOAD_DIR = os.path.join(PROJECT_ROOT, "uploads")
 
-UPLOAD_FOLDER = os.path.join(
-    PROJECT_ROOT,
-    "uploads"
-)
-
-MAX_FILE_SIZE = 100 * 1024 * 1024
+MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 MB
 
 ALLOWED_EXTENSIONS = {
-    "pdf",
-    "png",
-    "jpg",
-    "jpeg"
+    ".pdf",
+    ".png",
+    ".jpg",
+    ".jpeg"
 }
 
-
-# ============================================================
-# CREATE UPLOAD FOLDER
-# ============================================================
-
-os.makedirs(
-    UPLOAD_FOLDER,
-    exist_ok=True
-)
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 # ============================================================
-# JWT AUTH HELPER
+# AUTHENTICATION
 # ============================================================
+def get_authenticated_user(authorization: str):
+    """
+    Validate Bearer token and return authenticated user.
+    """
 
-from api.auth_api import get_user_from_token
-
-
-def get_authenticated_user(
-    authorization
-):
-
-    payload = get_user_from_token(
-        authorization
-    )
-
-    try:
-        user_id = int(
-            payload["sub"]
-        )
-    except Exception:
-
+    if not authorization:
         raise HTTPException(
             status_code=401,
-            detail="Invalid user information in token"
+            detail="Authorization header is required."
         )
 
-    return user_id
+    try:
+        from api.auth_api import get_user_from_token
+
+        user = get_user_from_token(authorization)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=401,
+            detail=f"Authentication failed: {str(e)}"
+        )
+
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired token."
+        )
+
+    return user
 
 
 # ============================================================
-# FILE EXTENSION
+# UPDATE DOCUMENT STATUS
 # ============================================================
+def update_document_status(
+    document_id,
+    status,
+    error_message=None
+):
+    """
+    Update processing status of a document.
+    """
 
-def get_extension(filename):
+    connection = get_db_connection()
 
-    if not filename:
-        return ""
-
-    filename = filename.lower()
-
-    if "." not in filename:
-        return ""
-
-    return filename.rsplit(
-        ".",
-        1
-    )[1]
-
-
-# ============================================================
-# SHA256 HASH
-# ============================================================
-
-def calculate_file_hash(file_path):
-
-    sha256 = hashlib.sha256()
-
-    with open(
-        file_path,
-        "rb"
-    ) as file:
-
-        while True:
-
-            data = file.read(
-                1024 * 1024
+    try:
+        connection.execute(
+            """
+            UPDATE documents
+            SET
+                processing_status = ?,
+                error_message = ?,
+                processed_at = CASE
+                    WHEN ? = 'processed'
+                    THEN CURRENT_TIMESTAMP
+                    ELSE processed_at
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                status,
+                error_message,
+                status,
+                document_id
             )
+        )
 
-            if not data:
-                break
+        connection.commit()
 
-            sha256.update(
-                data
-            )
+    except Exception:
+        connection.rollback()
+        raise
 
-    return sha256.hexdigest()
+    finally:
+        connection.close()
 
 
 # ============================================================
-# UPLOAD DOCUMENT / IMAGE
+# UPLOAD DOCUMENT
 # ============================================================
-
 @documents_router.post("/upload")
 async def upload_document(
     file: UploadFile = File(...),
-    authorization: str = Header(default=None)
+    authorization: str = Header(None)
 ):
+    """
+    Upload and process PDF/image document.
+    """
 
-    user_id = get_authenticated_user(
-        authorization
-    )
+    # --------------------------------------------------------
+    # Authenticate user
+    # --------------------------------------------------------
+    user = get_authenticated_user(authorization)
+
+    user_id = user.get("sub") or user.get("id")
+
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid user information."
+        )
 
     # --------------------------------------------------------
     # Validate filename
     # --------------------------------------------------------
-
     if not file.filename:
-
         raise HTTPException(
             status_code=400,
-            detail="Filename is required"
+            detail="Filename is required."
         )
 
-    original_filename = file.filename.strip()
-
-    extension = get_extension(
-        original_filename
+    original_filename = os.path.basename(
+        file.filename
     )
 
-    if extension not in ALLOWED_EXTENSIONS:
+    extension = os.path.splitext(
+        original_filename
+    )[1].lower()
 
+    # --------------------------------------------------------
+    # Validate extension
+    # --------------------------------------------------------
+    if extension not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
             detail=(
                 "Unsupported file type. "
-                "Allowed: PDF, PNG, JPG, JPEG"
+                "Allowed: PDF, PNG, JPG, JPEG."
             )
         )
 
     # --------------------------------------------------------
     # Read file
     # --------------------------------------------------------
+    try:
+        file_bytes = await file.read()
 
-    file_data = await file.read()
-
-    if not file_data:
-
+    except Exception as e:
         raise HTTPException(
             status_code=400,
-            detail="Uploaded file is empty"
+            detail=f"Could not read uploaded file: {str(e)}"
         )
 
-    if len(file_data) > MAX_FILE_SIZE:
+    # --------------------------------------------------------
+    # Validate size
+    # --------------------------------------------------------
+    file_size = len(file_bytes)
 
+    if file_size == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Uploaded file is empty."
+        )
+
+    if file_size > MAX_FILE_SIZE:
         raise HTTPException(
             status_code=413,
-            detail="File size exceeds 100 MB limit"
+            detail="File size exceeds 100 MB limit."
         )
 
     # --------------------------------------------------------
-    # Calculate hash
+    # Calculate SHA256 hash
     # --------------------------------------------------------
-
     content_hash = hashlib.sha256(
-        file_data
+        file_bytes
     ).hexdigest()
 
+    # ========================================================
+    # DATABASE CONNECTION
+    # ========================================================
     connection = get_db_connection()
 
     try:
@@ -235,16 +238,16 @@ async def upload_document(
         # ----------------------------------------------------
         # Duplicate check
         # ----------------------------------------------------
-
         existing = connection.execute(
             """
             SELECT
                 id,
-                filename,
+                original_filename,
                 processing_status
             FROM documents
             WHERE uploader_id = ?
-            AND content_hash = ?
+              AND content_hash = ?
+            LIMIT 1
             """,
             (
                 user_id,
@@ -254,49 +257,44 @@ async def upload_document(
 
         if existing:
 
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "message": "Duplicate file already uploaded",
-                    "document_id": existing["id"],
-                    "filename": existing["filename"],
-                    "processing_status": existing["processing_status"]
-                }
-            )
+            return {
+                "status": "duplicate",
+                "message": "This document has already been uploaded.",
+                "document_id": existing["id"],
+                "filename": existing["original_filename"],
+                "processing_status": existing["processing_status"]
+            }
 
         # ----------------------------------------------------
         # Generate safe stored filename
         # ----------------------------------------------------
-
         stored_filename = (
             f"{uuid.uuid4().hex}_"
-            f"{os.path.basename(original_filename)}"
+            f"{original_filename}"
         )
 
         file_path = os.path.join(
-            UPLOAD_FOLDER,
+            UPLOAD_DIR,
             stored_filename
         )
 
         # ----------------------------------------------------
-        # Save file
+        # Save physical file
         # ----------------------------------------------------
-
-        with open(
-            file_path,
-            "wb"
-        ) as output_file:
-
-            output_file.write(
-                file_data
-            )
+        with open(file_path, "wb") as output_file:
+            output_file.write(file_bytes)
 
         # ----------------------------------------------------
-        # Insert document
+        # Detect file type
         # ----------------------------------------------------
+        if extension == ".pdf":
+            file_type = "pdf"
+        else:
+            file_type = "image"
 
-        file_type = extension
-
+        # ----------------------------------------------------
+        # Insert document record
+        # ----------------------------------------------------
         cursor = connection.execute(
             """
             INSERT INTO documents (
@@ -315,7 +313,7 @@ async def upload_document(
                 stored_filename,
                 original_filename,
                 file_type,
-                len(file_data),
+                file_size,
                 file_path,
                 user_id,
                 "uploaded",
@@ -327,114 +325,152 @@ async def upload_document(
 
         connection.commit()
 
-    except HTTPException:
-        raise
-
-    except Exception as error:
+    except Exception as e:
 
         connection.rollback()
 
-        # Remove file if DB insertion failed
-        if os.path.exists(file_path):
-
-            os.remove(
-                file_path
-            )
+        # Remove physical file if DB insertion failed
+        try:
+            if "file_path" in locals() and os.path.exists(file_path):
+                os.remove(file_path)
+        except Exception:
+            pass
 
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to save document: {str(error)}"
+            detail=f"Could not save document: {str(e)}"
         )
 
     finally:
-
         connection.close()
 
     # ========================================================
-    # PROCESS FILE
+    # PROCESS DOCUMENT
     # ========================================================
-
-    processing_result = None
-
     try:
 
-        if extension == "pdf":
+        # ----------------------------------------------------
+        # PDF PROCESSING
+        # ----------------------------------------------------
+        if extension == ".pdf":
 
             processing_result = process_pdf(
                 document_id
             )
 
+        # ----------------------------------------------------
+        # IMAGE PROCESSING
+        # ----------------------------------------------------
         else:
 
-            processing_result = (
-                analyze_uploaded_image(
-                    file_path,
-                    document_id
+            processing_result = analyze_uploaded_image(
+                image_path=file_path,
+                document_id=document_id,
+                page_number=1,
+                image_index=0
+            )
+
+        # ----------------------------------------------------
+        # Validate processor result
+        # ----------------------------------------------------
+        if not processing_result:
+
+            raise RuntimeError(
+                "Document processor returned no result."
+            )
+
+        if processing_result.get("status") != "success":
+
+            raise RuntimeError(
+                processing_result.get(
+                    "error",
+                    "Document processing failed."
                 )
+            )
+
+        # ====================================================
+        # PROCESSING SUCCESS
+        # ====================================================
+        update_document_status(
+            document_id=document_id,
+            status="processed",
+            error_message=None
+        )
+
+        # ----------------------------------------------------
+        # Rebuild vector index
+        # ----------------------------------------------------
+        try:
+            rebuild_index()
+        except Exception as index_error:
+            print(
+                "Warning: Vector index rebuild failed:",
+                index_error
             )
 
         return {
             "status": "success",
-            "message": "File uploaded and processed successfully",
+            "message": "File uploaded and processed successfully.",
             "document_id": document_id,
             "filename": original_filename,
             "file_type": file_type,
-            "file_size": len(file_data),
-            "processing": processing_result
+            "processing_status": "processed",
+            "processing_result": processing_result
         }
 
-    except Exception as error:
+    # ========================================================
+    # PROCESSING FAILURE
+    # ========================================================
+    except Exception as processing_error:
 
-        connection = get_db_connection()
+        error_message = str(
+            processing_error
+        )
+
+        print(
+            f"Document processing failed "
+            f"for document {document_id}: "
+            f"{error_message}"
+        )
 
         try:
-
-            connection.execute(
-                """
-                UPDATE documents
-                SET processing_status = ?,
-                    error_message = ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                """,
-                (
-                    "failed",
-                    str(error),
-                    document_id
-                )
+            update_document_status(
+                document_id=document_id,
+                status="failed",
+                error_message=error_message
+            )
+        except Exception as status_error:
+            print(
+                "Could not update failed status:",
+                status_error
             )
 
-            connection.commit()
-
-        finally:
-
-            connection.close()
-
         return {
-            "status": "success",
-            "message": "File uploaded but processing failed",
+            "status": "failed",
+            "message": (
+                "File uploaded but processing failed."
+            ),
             "document_id": document_id,
             "filename": original_filename,
-            "file_type": file_type,
-            "processing": {
-                "status": "failed",
-                "error": str(error)
-            }
+            "processing_status": "failed",
+            "error": error_message
         }
 
 
 # ============================================================
-# LIST DOCUMENTS
+# LIST USER DOCUMENTS
 # ============================================================
-
 @documents_router.get("")
-def list_documents(
-    authorization: str = Header(default=None)
+async def list_documents(
+    authorization: str = Header(None)
 ):
+    """
+    Return all documents uploaded by current user.
+    """
 
-    user_id = get_authenticated_user(
-        authorization
-    )
+    user = get_authenticated_user(authorization)
+
+    user_id = user.get("sub") or user.get("id")
 
     connection = get_db_connection()
 
@@ -449,7 +485,6 @@ def list_documents(
                 file_type,
                 file_size,
                 upload_date,
-                uploader_id,
                 processing_status,
                 page_count,
                 error_message,
@@ -460,44 +495,44 @@ def list_documents(
             WHERE uploader_id = ?
             ORDER BY created_at DESC
             """,
-            (
-                user_id,
-            )
+            (user_id,)
         ).fetchall()
+
+        documents = [
+            dict(row)
+            for row in rows
+        ]
 
         return {
             "status": "success",
-            "count": len(rows),
-            "documents": [
-                dict(row)
-                for row in rows
-            ]
+            "documents": documents
         }
 
     finally:
-
         connection.close()
 
 
 # ============================================================
-# DOCUMENT DETAIL
+# GET DOCUMENT DETAILS
 # ============================================================
-
 @documents_router.get("/{document_id}")
-def get_document(
+async def get_document(
     document_id: int,
-    authorization: str = Header(default=None)
+    authorization: str = Header(None)
 ):
+    """
+    Get details of one document.
+    """
 
-    user_id = get_authenticated_user(
-        authorization
-    )
+    user = get_authenticated_user(authorization)
+
+    user_id = user.get("sub") or user.get("id")
 
     connection = get_db_connection()
 
     try:
 
-        document = connection.execute(
+        row = connection.execute(
             """
             SELECT
                 id,
@@ -505,6 +540,7 @@ def get_document(
                 original_filename,
                 file_type,
                 file_size,
+                file_path,
                 upload_date,
                 uploader_id,
                 processing_status,
@@ -515,7 +551,7 @@ def get_document(
                 updated_at
             FROM documents
             WHERE id = ?
-            AND uploader_id = ?
+              AND uploader_id = ?
             """,
             (
                 document_id,
@@ -523,82 +559,53 @@ def get_document(
             )
         ).fetchone()
 
-        if not document:
+        if not row:
 
             raise HTTPException(
                 status_code=404,
-                detail="Document not found"
+                detail="Document not found."
             )
-
-        chunk_count = connection.execute(
-            """
-            SELECT COUNT(*) AS count
-            FROM document_chunks
-            WHERE document_id = ?
-            """,
-            (
-                document_id,
-            )
-        ).fetchone()["count"]
-
-        image_count = connection.execute(
-            """
-            SELECT COUNT(*) AS count
-            FROM image_analysis
-            WHERE document_id = ?
-            """,
-            (
-                document_id,
-            )
-        ).fetchone()["count"]
-
-        result = dict(
-            document
-        )
-
-        result["chunk_count"] = chunk_count
-        result["image_count"] = image_count
 
         return {
             "status": "success",
-            "document": result
+            "document": dict(row)
         }
 
     finally:
-
         connection.close()
 
 
 # ============================================================
-# PROCESSING STATUS
+# DOCUMENT STATUS
 # ============================================================
-
 @documents_router.get("/{document_id}/status")
-def document_status(
+async def get_document_status(
     document_id: int,
-    authorization: str = Header(default=None)
+    authorization: str = Header(None)
 ):
+    """
+    Get processing status of a document.
+    """
 
-    user_id = get_authenticated_user(
-        authorization
-    )
+    user = get_authenticated_user(authorization)
+
+    user_id = user.get("sub") or user.get("id")
 
     connection = get_db_connection()
 
     try:
 
-        document = connection.execute(
+        row = connection.execute(
             """
             SELECT
                 id,
                 original_filename,
                 processing_status,
-                page_count,
                 error_message,
                 processed_at
             FROM documents
             WHERE id = ?
-            AND uploader_id = ?
+              AND uploader_id = ?
             """,
             (
                 document_id,
@@ -606,41 +613,45 @@ def document_status(
             )
         ).fetchone()
 
-        if not document:
+        if not row:
 
             raise HTTPException(
                 status_code=404,
-                detail="Document not found"
+                detail="Document not found."
             )
 
         return {
             "status": "success",
-            "document": dict(document)
+            "document": dict(row)
         }
 
     finally:
-
         connection.close()
 
 
 # ============================================================
 # DELETE DOCUMENT
 # ============================================================
-
 @documents_router.delete("/{document_id}")
-def delete_document(
+async def delete_document(
     document_id: int,
-    authorization: str = Header(default=None)
+    authorization: str = Header(None)
 ):
+    """
+    Delete a user's document and associated data.
+    """
 
-    user_id = get_authenticated_user(
-        authorization
-    )
+    user = get_authenticated_user(authorization)
+
+    user_id = user.get("sub") or user.get("id")
 
     connection = get_db_connection()
 
     try:
 
+        # ----------------------------------------------------
+        # Find document
+        # ----------------------------------------------------
         document = connection.execute(
             """
             SELECT
@@ -649,7 +660,7 @@ def delete_document(
                 original_filename
             FROM documents
             WHERE id = ?
-            AND uploader_id = ?
+              AND uploader_id = ?
             """,
             (
                 document_id,
@@ -661,7 +672,7 @@ def delete_document(
 
             raise HTTPException(
                 status_code=404,
-                detail="Document not found"
+                detail="Document not found."
             )
 
         file_path = document["file_path"]
@@ -669,54 +680,44 @@ def delete_document(
         # ----------------------------------------------------
         # Delete query sources
         # ----------------------------------------------------
-
         connection.execute(
             """
             DELETE FROM query_sources
             WHERE document_id = ?
             """,
-            (
-                document_id,
-            )
+            (document_id,)
         )
 
         # ----------------------------------------------------
         # Delete image analysis
         # ----------------------------------------------------
-
         connection.execute(
             """
             DELETE FROM image_analysis
             WHERE document_id = ?
             """,
-            (
-                document_id,
-            )
+            (document_id,)
         )
 
         # ----------------------------------------------------
         # Delete chunks
         # ----------------------------------------------------
-
         connection.execute(
             """
             DELETE FROM document_chunks
             WHERE document_id = ?
             """,
-            (
-                document_id,
-            )
+            (document_id,)
         )
 
         # ----------------------------------------------------
         # Delete document
         # ----------------------------------------------------
-
         connection.execute(
             """
             DELETE FROM documents
             WHERE id = ?
-            AND uploader_id = ?
+              AND uploader_id = ?
             """,
             (
                 document_id,
@@ -726,78 +727,77 @@ def delete_document(
 
         connection.commit()
 
-    finally:
+    except HTTPException:
+        connection.rollback()
+        raise
 
+    except Exception as e:
+
+        connection.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not delete document: {str(e)}"
+        )
+
+    finally:
         connection.close()
 
-    # --------------------------------------------------------
-    # Delete physical file
-    # --------------------------------------------------------
-
-    if file_path and os.path.exists(
-        file_path
-    ):
-
-        try:
-
-            os.remove(
-                file_path
-            )
-
-        except Exception as error:
-
-            print(
-                "File deletion error:",
-                error
-            )
-
-    # --------------------------------------------------------
-    # Delete extracted images
-    # --------------------------------------------------------
-
-    extracted_folder = os.path.join(
-        PROJECT_ROOT,
-        "extracted_images",
-        str(document_id)
-    )
-
-    if os.path.exists(
-        extracted_folder
-    ):
-
-        try:
-
-            shutil.rmtree(
-                extracted_folder
-            )
-
-        except Exception as error:
-
-            print(
-                "Extracted image deletion error:",
-                error
-            )
-
-    # --------------------------------------------------------
-    # Rebuild FAISS
-    # --------------------------------------------------------
-
-    vector_index_result = None
-
+    # ========================================================
+    # DELETE PHYSICAL FILE
+    # ========================================================
     try:
 
-        vector_index_result = rebuild_index()
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
 
-    except Exception as error:
+    except Exception as e:
 
-        vector_index_result = {
-            "status": "failed",
-            "error": str(error)
-        }
+        print(
+            "Warning: Could not delete physical file:",
+            e
+        )
+
+    # ========================================================
+    # DELETE EXTRACTED IMAGES FOLDER
+    # ========================================================
+    try:
+
+        extracted_images_dir = os.path.join(
+            UPLOAD_DIR,
+            f"extracted_images_{document_id}"
+        )
+
+        if os.path.exists(extracted_images_dir):
+
+            shutil.rmtree(
+                extracted_images_dir,
+                ignore_errors=True
+            )
+
+    except Exception as e:
+
+        print(
+            "Warning: Could not delete extracted images:",
+            e
+        )
+
+    # ========================================================
+    # REBUILD VECTOR INDEX
+    # ========================================================
+    try:
+
+        rebuild_index()
+
+    except Exception as e:
+
+        print(
+            "Warning: Could not rebuild vector index:",
+            e
+        )
 
     return {
         "status": "success",
-        "message": "Document deleted successfully",
-        "document_id": document_id,
-        "vector_index": vector_index_result
+        "message": "Document deleted successfully.",
+        "document_id": document_id
     }

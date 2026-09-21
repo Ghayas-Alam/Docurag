@@ -38,7 +38,7 @@ from database.database import get_db_connection
 # EMBEDDING MODEL
 # ============================================================
 
-MODEL_NAME = "all-MiniLM-L6-v2"
+MODEL_NAME = "all-mpnet-base-v2"
 
 print("Loading embedding model...")
 

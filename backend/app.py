@@ -2,6 +2,7 @@ from flask import Flask, jsonify
 import sys
 import os
 
+
 # =========================
 # Project Root
 # =========================
@@ -30,6 +31,7 @@ from database.database import (
 from routes.auth import auth_bp
 from routes.documents import documents_bp
 from routes.rag import rag_bp
+from routes.admin import admin_bp
 
 
 # =========================
@@ -43,7 +45,6 @@ app = Flask(__name__)
 # Session Configuration
 # =========================
 
-# Development secret key
 app.config["SECRET_KEY"] = "docurag-development-secret-key"
 
 app.config["SESSION_COOKIE_HTTPONLY"] = True
@@ -82,6 +83,13 @@ app.register_blueprint(
 )
 
 
+# Admin
+app.register_blueprint(
+    admin_bp,
+    url_prefix="/api/admin"
+)
+
+
 # =========================
 # Health Check
 # =========================
@@ -98,21 +106,15 @@ def health_check():
         connection.close()
 
         return jsonify({
-
             "status": "success",
-
             "message": "DocuRAG backend and database are working"
-
         }), 200
 
     except Exception:
 
         return jsonify({
-
             "status": "error",
-
             "message": "Database connection failed"
-
         }), 500
 
 
