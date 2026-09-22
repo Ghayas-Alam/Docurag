@@ -16,3 +16,4 @@ PyMuPDF
 Pillow
 pytesseract
 Werkzeug
+python-jose
