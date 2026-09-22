@@ -17,3 +17,4 @@ Pillow
 pytesseract
 Werkzeug
 python-jose
+requests
