@@ -1,6 +1,11 @@
 import os
 import sys
 
+from dotenv import load_dotenv
+
+# Load .env BEFORE importing any backend modules
+load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -8,6 +13,7 @@ from backend.api.auth_api import auth_router
 from backend.api.documents_api import documents_router
 from backend.api.rag_api import rag_router
 from backend.api.admin_api import admin_router
+from backend.api.chat_api import chat_router
 
 
 # ============================================================
@@ -72,6 +78,10 @@ app.include_router(
 # Admin
 app.include_router(
     admin_router
+)
+# Normal Chat
+app.include_router(
+    chat_router
 )
 
 

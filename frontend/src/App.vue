@@ -849,6 +849,94 @@ async function newChat() {
   persistChatState()
 }
 
+
+
+
+async function normalChat() {
+  const trimmedQuestion = question.value.trim()
+
+  if (!trimmedQuestion) {
+    return
+  }
+
+  const token = localStorage.getItem('access_token')
+
+  if (!token) {
+    logout()
+    return
+  }
+
+  chatError.value = ''
+
+  // Show user's message immediately
+  messages.value.push({
+    role: 'user',
+    content: trimmedQuestion
+  })
+
+  question.value = ''
+  asking.value = true
+
+  try {
+    const response = await fetch(`${API_URL}/chat/normal`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        message: trimmedQuestion
+      })
+    })
+
+    const data = await response.json()
+
+    if (response.status === 401) {
+      logout()
+      return
+    }
+
+    if (!response.ok) {
+      throw new Error(
+        data.detail ||
+        data.message ||
+        'Failed to get Gemini response.'
+      )
+    }
+
+    // Add Gemini response to the same chatbox
+    messages.value.push({
+      role: 'assistant',
+      content: data.answer || 'No answer was generated.',
+      confidence: null,
+      sources: [],
+      imageSources: [],
+      cacheHit: false,
+      normalChat: true
+    })
+
+  } catch (error) {
+    console.error('Normal chat error:', error)
+
+    chatError.value =
+      error.message ||
+      'Failed to process your message.'
+  } finally {
+    asking.value = false
+  }
+}
+
+function handleChatSubmit() {
+  if (selectedDocumentId.value) {
+    askQuestion()
+  } else {
+    normalChat()
+  }
+}
+
+
+
+
 /* =========================================================
    DISPLAY HELPERS
 ========================================================= */
@@ -1466,13 +1554,13 @@ onMounted(async () => {
               class="composer-input"
               placeholder="Ask a question about the selected document…"
               :disabled="asking"
-              @keyup.enter="askQuestion"
+              @keyup.enter="handleChatSubmit"
             />
             <button
               class="btn btn-ink"
               :disabled="asking || !question.trim()"
               :aria-label="asking ? 'Searching documents' : 'Ask DocuRAG'"
-              @click="askQuestion"
+              @click="handleChatSubmit"
             >
               <span v-if="asking">…</span>
               <span v-else>Ask</span>
