@@ -18,3 +18,4 @@ pytesseract
 Werkzeug
 python-jose
 requests
+email-validator
