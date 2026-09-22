@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+pydantic
+pydantic-settings
+python-multipart
+passlib[bcrypt]
+bcrypt
+PyJWT
+google-genai
+numpy
+faiss-cpu
+sentence-transformers
+rank-bm25
+PyMuPDF
+Pillow
+pytesseract
